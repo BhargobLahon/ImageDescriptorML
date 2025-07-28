@@ -23,8 +23,19 @@
       "output": "static",
       "favicon": "./assets/images/favicon.png"
     },
+     "permissions": [
+      "CAMERA",
+      "RECORD_AUDIO",
+      "MODIFY_AUDIO_SETTINGS"
+    ],
     "plugins": [
       "expo-router",
+        [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow $(PRODUCT_NAME) to access your camera"
+        }
+      ],
       [
         "expo-splash-screen",
         {

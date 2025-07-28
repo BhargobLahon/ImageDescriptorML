@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import {
   View,
   Text,
@@ -12,7 +12,9 @@ import {
   PanResponderGestureState,
 } from 'react-native';
 import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
+import { Audio } from 'expo-av';
 import * as Speech from 'expo-speech';
+import * as FileSystem from 'expo-file-system';
 import { Ionicons } from '@expo/vector-icons';
 
 // Type definition for Camera ref
@@ -30,119 +32,458 @@ interface Language {
   voice: string;
 }
 
+interface CaptionData {
+  text: string;
+  audio_base64?: string;
+}
+
 const { width, height } = Dimensions.get('window');
-const [captions, setCaptions] = useState<Record<string, string>>({});
-const [hazardInfo, setHazardInfo] = useState<string | null>(null);
 
-
-
-
+// Updated languages without Assamese and improved voice codes
 const LANGUAGES: Language[] = [
-  { code: 'en', name: 'English', voice: 'en-US' },
-  { code: 'hi', name: 'Hindi', voice: 'hi-IN' },
-  { code: 'as', name: 'Assamese', voice: 'as-IN' },
-  { code: 'bn', name: 'Bengali', voice: 'bn-IN' },
-  { code: 'te', name: 'Telugu', voice: 'te-IN' },
-  { code: 'ta', name: 'Tamil', voice: 'ta-IN' }
+  { code: 'english', name: 'English', voice: 'en-US' },
+  { code: 'hindi', name: 'Hindi', voice: 'hi-IN' },
+  { code: 'bengali', name: 'Bengali', voice: 'bn-IN' },
+  { code: 'telugu', name: 'Telugu', voice: 'te-IN' },
+  { code: 'tamil', name: 'Tamil', voice: 'ta-IN' },
+  { code: 'malayalam', name: 'Malayalam', voice: 'ml-IN' }
 ];
 
-const MOCK_DESCRIPTIONS: Record<string, string> = {
-  en: "This image shows a beautiful landscape with mountains in the background and a clear blue sky. There are green trees in the foreground and what appears to be a small lake or pond reflecting the scenery.",
-  hi: "यह छवि पृष्ठभूमि में पहाड़ों और स्पष्ट नीले आकाश के साथ एक सुंदर परिदृश्य दिखाती है। अग्रभूमि में हरे पेड़ हैं और एक छोटी झील या तालाब दिखाई देता है जो दृश्य को दर्शाता है।",
-  as: "এই ছবিখনত পাছফালে পাহাৰ আৰু স্পষ্ট নীলা আকাশৰ সৈতে এক সুন্দৰ প্ৰাকৃতিক দৃশ্য দেখা গৈছে। সন্মুখত সেউজীয়া গছ আছে আৰু এটা সৰু হ্ৰদ বা পুখুৰী আছে যি দৃশ্যটো প্ৰতিফলিত কৰিছে।",
-  bn: "এই ছবিতে পটভূমিতে পাহাড় এবং স্বচ্ছ নীল আকাশ সহ একটি সুন্দর প্রাকৃতিক দৃশ্য দেখা যাচ্ছে। সামনের দিকে সবুজ গাছ রয়েছে এবং একটি ছোট হ্রদ বা পুকুর রয়েছে যা দৃশ্যটি প্রতিফলিত করছে।",
-  te: "ఈ చిత్రం వెనుకభాగంలో పర్వతాలు మరియు స్పష్టమైన నీలి ఆకాశంతో అందమైన ప్రకృతి దృశ్యాన్ని చూపిస్తుంది. ముందు భాగంలో ఆకుపచ్చ చెట్లు ఉన్నాయి మరియు దృశ్యాన్ని ప్రతిబింబించే చిన్న సరస్సు లేదా చెరువు కనిపిస్తుంది।",
-  ta: "இந்த படத்தில் பின்னணியில் மலைகள் மற்றும் தெளிவான நீல வானத்துடன் ஒரு அழகான இயற்கை காட்சி காட்டப்பட்டுள்ளது. முன்புறத்தில் பச்சை மரங்கள் உள்ளன மற்றும் காட்சியை பிரதிபலிக்கும் ஒரு சிறிய ஏரி அல்லது குளம் தெரிகிறது."
-};
-
 export default function MultilingualCameraApp() {
+  // State hooks
   const [currentScreen, setCurrentScreen] = useState<'camera' | 'result'>('camera');
   const [capturedImage, setCapturedImage] = useState<string | null>(null);
   const [currentLanguageIndex, setCurrentLanguageIndex] = useState<number>(0);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
+  const [captions, setCaptions] = useState<Record<string, CaptionData>>({});
+  const [hazardInfo, setHazardInfo] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [audioMode, setAudioMode] = useState<'server' | 'tts'>('server');
+  const [hasPlayedAudio, setHasPlayedAudio] = useState<boolean>(false);
+  const [isPlayingDescription, setIsPlayingDescription] = useState<boolean>(false);
+  const [isPlayingHazard, setIsPlayingHazard] = useState<boolean>(false);
+  
+  // Hooks
   const [permission, requestPermission] = useCameraPermissions();
   const cameraRef = useRef<CameraRef | null>(null);
+  const soundRef = useRef<Audio.Sound | null>(null);
 
   const currentLanguage = LANGUAGES[currentLanguageIndex];
 
-  const captureImage = useCallback(async () => {
-  if (cameraRef.current) {
-    try {
-      const photo = await cameraRef.current.takePictureAsync({
-        quality: 0.8,
-        base64: false,
-      });
-
-      setCapturedImage(photo.uri);
-
-      const formData = new FormData();
-      formData.append('file', {
-        uri: photo.uri,
-        name: 'image.jpg',
-        type: 'image/jpeg',
-      } as any);
-
-      const response = await fetch('http://172.20.10.3:8000/analyze-image', {  // Replace with your IP
-        method: 'POST',
-        body: formData,
-        headers: {
-          'Content-Type': 'multipart/form-data',
-        },
-      });
-
-      const result = await response.json();
-
-      // Extract captions from API response
-      const extractedCaptions: Record<string, string> = {};
-      for (const [lang, data] of Object.entries(result.image_caption)) {
-        extractedCaptions[lang] = (data as any).text;
+  // Initialize audio
+  useEffect(() => {
+    const initAudio = async () => {
+      try {
+        await Audio.setAudioModeAsync({
+          allowsRecordingIOS: false,
+          staysActiveInBackground: false,
+          playsInSilentModeIOS: true,
+          shouldDuckAndroid: true,
+          playThroughEarpieceAndroid: false,
+        });
+      } catch (error) {
+        console.error('Audio initialization failed:', error);
       }
+    };
+    
+    initAudio();
 
-      setCaptions(extractedCaptions);
-      setHazardInfo(result.hazard_detection);
-      setCurrentScreen('result');
-    } catch (error) {
-      console.error('Error capturing or sending image:', error);
-      Alert.alert('Error', 'Failed to process image');
-    }
-  }
-}, []);
-
-
-
- const speakDescription = useCallback(async () => {
-  if (isPlaying) {
-    Speech.stop();
-    setIsPlaying(false);
-  } else {
-    try {
-      setIsPlaying(true);
-      const text = captions[currentLanguage.code] || 'No description available';
-      await Speech.speak(text, {
-        language: currentLanguage.voice,
-        rate: 0.8,
-        onDone: () => setIsPlaying(false),
-        onError: () => setIsPlaying(false),
-      });
-    } catch (error) {
-      console.error('Error speaking:', error);
-      setIsPlaying(false);
-    }
-  }
-}, [captions, currentLanguage, isPlaying]);
-
-
-  const returnToCamera = useCallback(() => {
-    Speech.stop();
-    setIsPlaying(false);
-    setCurrentScreen('camera');
-    setCapturedImage(null);
+    // Cleanup function
+    return () => {
+      if (soundRef.current) {
+        soundRef.current.unloadAsync();
+      }
+    };
   }, []);
 
-  const changeLanguage = useCallback(() => {
+  // Auto-play audio when language changes or when first loaded
+  useEffect(() => {
+    if (currentScreen === 'result' && captions && Object.keys(captions).length > 0) {
+      const timer = setTimeout(() => {
+        speakCurrentDescription();
+      }, 500); // Small delay to ensure UI is ready
+
+      return () => clearTimeout(timer);
+    }
+  }, [currentLanguageIndex, currentScreen, captions]);
+
+  const captureImage = useCallback(async () => {
+    if (cameraRef.current && !isLoading) {
+      try {
+        setIsLoading(true);
+        console.log('📸 Capturing image...');
+        
+        const photo = await cameraRef.current.takePictureAsync({
+          quality: 0.8,
+          base64: false,
+        });
+
+        setCapturedImage(photo.uri);
+        console.log('📷 Image captured, uploading to server...');
+
+        // Create FormData for upload
+        const formData = new FormData();
+        formData.append('file', {
+          uri: photo.uri,
+          name: 'image.jpg',
+          type: 'image/jpeg',
+        } as any);
+
+        // Make API call - UPDATE THIS IP ADDRESS TO YOUR SERVER'S IP
+        const response = await fetch('http://192.168.9.7:8000/analyze-image', {
+          method: 'POST',
+          body: formData,
+          headers: {
+            'Content-Type': 'multipart/form-data',
+          },
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const result = await response.json();
+        console.log('✅ API Response received:', Object.keys(result));
+
+        // Process the response
+        if (result.image_caption) {
+          const processedCaptions: Record<string, CaptionData> = {};
+          
+          for (const [lang, data] of Object.entries(result.image_caption)) {
+            if (typeof data === 'object' && data !== null) {
+              const captionData = data as any;
+              processedCaptions[lang] = {
+                text: captionData.text || 'No description available',
+                audio_base64: captionData.audio_base64
+              };
+            }
+          }
+          
+          setCaptions(processedCaptions);
+          console.log('📝 Captions processed for languages:', Object.keys(processedCaptions));
+        }
+
+        setHazardInfo(result.hazard_detection || 'No hazard information available');
+        setHasPlayedAudio(false); // Reset audio flag for new analysis
+        setCurrentScreen('result');
+        
+      } catch (error) {
+        console.error('❌ Error capturing or processing image:', error);
+        Alert.alert(
+          'Error', 
+          'Failed to process image. Please check your network connection and server status.',
+          [
+            { text: 'OK' },
+            { text: 'Retry', onPress: () => captureImage() }
+          ]
+        );
+      } finally {
+        setIsLoading(false);
+      }
+    }
+  }, [isLoading]);
+
+  const playServerAudio = useCallback(async (audioBase64: string) => {
+    try {
+      console.log('🔊 Playing server-generated audio...');
+      
+      // Stop any currently playing audio
+      if (soundRef.current) {
+        await soundRef.current.unloadAsync();
+        soundRef.current = null;
+      }
+
+      // Create a temporary file from base64 data
+      const audioUri = `${FileSystem.documentDirectory}temp_audio_${Date.now()}.mp3`;
+      
+      // Remove the data URL prefix if present
+      const base64Data = audioBase64.replace(/^data:audio\/mp3;base64,/, '');
+      
+      await FileSystem.writeAsStringAsync(audioUri, base64Data, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+
+      // Load and play the audio
+      const { sound } = await Audio.Sound.createAsync(
+        { uri: audioUri },
+        { shouldPlay: true, volume: 1.0 }
+      );
+      
+      soundRef.current = sound;
+
+      // Return a promise that resolves when audio finishes
+      return new Promise<void>((resolve, reject) => {
+        sound.setOnPlaybackStatusUpdate((status) => {
+          if (status.isLoaded && status.didJustFinish) {
+            // Clean up temp file
+            FileSystem.deleteAsync(audioUri, { idempotent: true });
+            resolve();
+          } else if (!status.isLoaded && status.error) {
+            reject(new Error(status.error));
+          }
+        });
+      });
+
+    } catch (error) {
+      console.error('❌ Server audio playback failed:', error);
+      throw error;
+    }
+  }, []);
+
+  const playTTSAudio = useCallback(async (text: string, language: Language) => {
+    try {
+      console.log('🗣️ Playing TTS audio...');
+      
+      // Return a promise that resolves when TTS finishes
+      return new Promise<void>((resolve, reject) => {
+        Speech.speak(text, {
+          language: language.voice,
+          rate: 0.75,
+          pitch: 1.0,
+          volume: 1.0,
+          onDone: () => {
+            console.log('✅ TTS completed');
+            resolve();
+          },
+          onError: (error) => {
+            console.error('❌ TTS error:', error);
+            reject(error);
+          },
+        });
+      });
+    } catch (error) {
+      console.error('❌ TTS playback failed:', error);
+      throw error;
+    }
+  }, []);
+
+  const hasHazardousObjects = useCallback(() => {
+    if (!hazardInfo) return false;
+    const lowerHazard = hazardInfo.toLowerCase();
+    return lowerHazard.includes('detected') && !lowerHazard.includes('no objects detected');
+  }, [hazardInfo]);
+
+  const translateHazardInfo = useCallback((hazardText: string, targetLanguage: Language) => {
+    // Simple translation mapping for common hazard terms
+    // In a real app, you'd use the same translation service as the main description
+    const translations: Record<string, Record<string, string>> = {
+      hindi: {
+        'Safety alert': 'सुरक्षा चेतावनी',
+        'No hazardous objects present in the image': 'छवि में कोई खतरनाक वस्तु मौजूद नहीं है',
+        'detected': 'का पता लगाया गया',
+        'close': 'पास',
+        'very close': 'बहुत पास',
+        'medium distance': 'मध्यम दूरी',
+        'far': 'दूर',
+        'left': 'बाएं',
+        'center': 'केंद्र',
+        'right': 'दाएं',
+        'Scissors': 'कैंची',
+        'Knife': 'चाकू'
+      },
+      bengali: {
+        'Safety alert': 'নিরাপত্তা সতর্কতা',
+        'No hazardous objects present in the image': 'ছবিতে কোনো বিপজ্জনক বস্তু নেই',
+        'detected': 'সনাক্ত করা হয়েছে',
+        'close': 'কাছে',
+        'very close': 'খুব কাছে',
+        'medium distance': 'মাঝারি দূরত্ব',
+        'far': 'দূরে',
+        'left': 'বাম',
+        'center': 'কেন্দ্র',
+        'right': 'ডান',
+        'Scissors': 'কাঁচি',
+        'Knife': 'ছুরি'
+      },
+      telugu: {
+        'Safety alert': 'భద్రతా హెచ్చరిక',
+        'No hazardous objects present in the image': 'చిత్రంలో ప్రమాదకరమైన వస్తువులు లేవు',
+        'detected': 'గుర్తించబడింది',
+        'close': 'దగ్గరగా',
+        'very close': 'చాలా దగ్గరగా',
+        'medium distance': 'మధ్య దూరం',
+        'far': 'దూరంగా',
+        'left': 'ఎడమ',
+        'center': 'మధ్య',
+        'right': 'కుడి',
+        'Scissors': 'కత్తెర',
+        'Knife': 'కత్తి'
+      },
+      tamil: {
+        'Safety alert': 'பாதுகாப்பு எச்சரிக்கை',
+        'No hazardous objects present in the image': 'படத்தில் ஆபத்தான பொருள்கள் எதுவும் இல்லை',
+        'detected': 'கண்டறியப்பட்டது',
+        'close': 'அருகில்',
+        'very close': 'மிக அருகில்',
+        'medium distance': 'நடுத்தர தூரம்',
+        'far': 'தொலைவில்',
+        'left': 'இடது',
+        'center': 'மையம்',
+        'right': 'வலது',
+        'Scissors': 'கத்தரிக்கோல்',
+        'Knife': 'கத்தி'
+      },
+      malayalam: {
+        'Safety alert': 'സുരക്ഷാ മുന്നറിയിപ്പ്',
+        'No hazardous objects present in the image': 'ചിത്രത്തിൽ അപകടകരമായ വസ്തുക്കൾ ഇല്ല',
+        'detected': 'കണ്ടെത്തി',
+        'close': 'അടുത്ത്',
+        'very close': 'വളരെ അടുത്ത്',
+        'medium distance': 'ഇടത്തരം ദൂരം',
+        'far': 'ദൂരെ',
+        'left': 'ഇടത്',
+        'center': 'മധ്യം',
+        'right': 'വലത്',
+        'Scissors': 'കത്രിക',
+        'Knife': 'കത്തി'
+      }
+    };
+
+    if (targetLanguage.code === 'english') {
+      return hazardText;
+    }
+
+    let translatedText = hazardText;
+    const langTranslations = translations[targetLanguage.code];
+    
+    if (langTranslations) {
+      Object.entries(langTranslations).forEach(([english, translated]) => {
+        const regex = new RegExp(english, 'gi');
+        translatedText = translatedText.replace(regex, translated);
+      });
+    }
+
+    return translatedText;
+  }, []);
+
+  const speakCurrentDescription = useCallback(async () => {
+    if (isPlaying) {
+      // Stop current playback
+      if (soundRef.current) {
+        await soundRef.current.unloadAsync();
+        soundRef.current = null;
+      }
+      Speech.stop();
+      setIsPlaying(false);
+      setIsPlayingDescription(false);
+      setIsPlayingHazard(false);
+      return;
+    }
+
+    const currentCaption = captions[currentLanguage.code];
+    if (!currentCaption) {
+      Alert.alert('No Description', 'No description available for this language.');
+      return;
+    }
+
+    try {
+      setIsPlaying(true);
+
+      // First, play the image description
+      setIsPlayingDescription(true);
+      console.log('🔊 Playing main description...');
+      
+      if (audioMode === 'server' && currentCaption.audio_base64) {
+        try {
+          await playServerAudio(currentCaption.audio_base64);
+        } catch (serverError) {
+          console.log('🔄 Server audio failed, falling back to TTS...');
+          await playTTSAudio(currentCaption.text, currentLanguage);
+        }
+      } else {
+        await playTTSAudio(currentCaption.text, currentLanguage);
+      }
+      
+      setIsPlayingDescription(false);
+      console.log('✅ Main description completed');
+
+      // Wait a moment between descriptions
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
+      // Always play safety information - either hazard alert or no hazard message
+      setIsPlayingHazard(true);
+      console.log('🔍 Playing safety information...');
+      
+      let safetyMessage = '';
+      
+      if (hasHazardousObjects()) {
+        console.log('🚨 Hazardous objects detected, playing hazard information...');
+        
+        let hazardText = hazardInfo || '';
+        
+        // Clean up the hazard text for better speech
+        hazardText = hazardText.replace(/Detected \d+ objects?:?\n?/i, 'Safety alert: ');
+        hazardText = hazardText.replace(/\d+\.\s*/g, ''); // Remove numbering
+        hazardText = hazardText.replace(/\s*-\s*\d+\.\d+\s*/g, ''); // Remove confidence scores
+        hazardText = hazardText.replace(/\(([^)]+)\)/g, '$1'); // Remove parentheses but keep content
+        hazardText = hazardText.trim();
+
+        safetyMessage = hazardText || 'Safety alert: Hazardous objects detected in the image';
+      } else {
+        console.log('✅ No hazardous objects, playing safety confirmation...');
+        safetyMessage = 'No hazardous objects present in the image';
+      }
+
+      if (safetyMessage) {
+        // Translate safety message to current language
+        const translatedSafetyMessage = translateHazardInfo(safetyMessage, currentLanguage);
+        console.log('🌍 Translated safety message:', translatedSafetyMessage);
+        
+        await playTTSAudio(translatedSafetyMessage, currentLanguage);
+      }
+      
+      setIsPlayingHazard(false);
+      console.log('✅ Safety information completed');
+      
+    } catch (error) {
+      console.error('❌ Audio playback failed:', error);
+      Alert.alert('Audio Error', 'Unable to play audio. Please check your device settings.');
+    } finally {
+      setIsPlaying(false);
+      setIsPlayingDescription(false);
+      setIsPlayingHazard(false);
+    }
+  }, [captions, currentLanguage, isPlaying, audioMode, playServerAudio, playTTSAudio, hazardInfo, hasHazardousObjects, translateHazardInfo]);
+
+  const speakDescription = useCallback(async () => {
+    await speakCurrentDescription();
+  }, [speakCurrentDescription]);
+
+  const returnToCamera = useCallback(async () => {
+    // Stop any playing audio
+    if (soundRef.current) {
+      await soundRef.current.unloadAsync();
+      soundRef.current = null;
+    }
     Speech.stop();
     setIsPlaying(false);
+    setIsPlayingDescription(false);
+    setIsPlayingHazard(false);
+    
+    // Reset state
+    setCurrentScreen('camera');
+    setCapturedImage(null);
+    setCaptions({});
+    setHazardInfo(null);
+    setHasPlayedAudio(false);
+  }, []);
+
+  const changeLanguage = useCallback(async () => {
+    // Stop current audio
+    if (soundRef.current) {
+      await soundRef.current.unloadAsync();
+      soundRef.current = null;
+    }
+    Speech.stop();
+    setIsPlaying(false);
+    setIsPlayingDescription(false);
+    setIsPlayingHazard(false);
+    
     setCurrentLanguageIndex((prev) => (prev + 1) % LANGUAGES.length);
+  }, []);
+
+  const toggleAudioMode = useCallback(() => {
+    setAudioMode(prev => prev === 'server' ? 'tts' : 'server');
   }, []);
 
   // Gesture handler for result screen
@@ -156,11 +497,8 @@ export default function MultilingualCameraApp() {
       
       if (Math.abs(dx) > minSwipeDistance || Math.abs(dy) > minSwipeDistance) {
         if (Math.abs(dx) > Math.abs(dy)) {
-          // Horizontal swipe
-          if (dx > 0) {
-            // Swipe right - change language
-            changeLanguage();
-          }
+          // Horizontal swipe - change language in either direction
+          changeLanguage();
         } else {
           // Vertical swipe
           if (dy < 0) {
@@ -174,9 +512,12 @@ export default function MultilingualCameraApp() {
 
   // Camera screen tap handler
   const handleCameraPress = useCallback(() => {
-    captureImage();
-  }, [captureImage]);
+    if (!isLoading) {
+      captureImage();
+    }
+  }, [captureImage, isLoading]);
 
+  // Early returns should come after all hooks are declared
   if (!permission) {
     return (
       <View style={styles.container}>
@@ -202,26 +543,40 @@ export default function MultilingualCameraApp() {
         style={styles.cameraContainer}
         onPress={handleCameraPress}
         activeOpacity={1}
+        disabled={isLoading}
       >
         <CameraView
           ref={cameraRef as any}
           style={styles.camera}
           facing="back"
+          autofocus="on"
         />
         
         {/* Overlay instructions */}
         <View style={styles.instructionOverlay}>
           <View style={styles.instructionBox}>
-            <Text style={styles.instructionText}>Touch anywhere to capture image</Text>
+            <Text style={styles.instructionText}>
+              {isLoading ? 'Processing image...' : 'Touch anywhere to capture image'}
+            </Text>
           </View>
         </View>
         
         {/* Camera icon overlay */}
         <View style={styles.cameraIconOverlay}>
-          <View style={styles.cameraIconContainer}>
+          <View style={[styles.cameraIconContainer, { opacity: isLoading ? 0.5 : 1 }]}>
             <Ionicons name="camera" size={32} color="white" />
           </View>
         </View>
+
+        {/* Loading indicator */}
+        {isLoading && (
+          <View style={styles.loadingOverlay}>
+            <View style={styles.loadingContainer}>
+              <Text style={styles.loadingText}>Processing...</Text>
+              <Text style={styles.loadingSubtext}>Analyzing image with AI models</Text>
+            </View>
+          </View>
+        )}
       </TouchableOpacity>
     );
   }
@@ -231,9 +586,22 @@ export default function MultilingualCameraApp() {
       {/* Header */}
       <View style={styles.header}>
         <Text style={styles.headerTitle}>Image Analysis</Text>
-        <View style={styles.languageIndicator}>
-          <Text style={styles.languageText}>{currentLanguage.name}</Text>
-          <View style={styles.statusDot} />
+        <View style={styles.headerControls}>
+          <TouchableOpacity
+            onPress={toggleAudioMode}
+            style={[
+              styles.audioModeButton,
+              { backgroundColor: audioMode === 'server' ? '#10b981' : '#6b7280' }
+            ]}
+          >
+            <Text style={styles.audioModeText}>
+              {audioMode === 'server' ? 'AI' : 'TTS'}
+            </Text>
+          </TouchableOpacity>
+          <View style={styles.languageIndicator}>
+            <Text style={styles.languageText}>{currentLanguage.name}</Text>
+            <View style={styles.statusDot} />
+          </View>
         </View>
       </View>
 
@@ -251,57 +619,84 @@ export default function MultilingualCameraApp() {
         <View style={styles.descriptionWrapper}>
           <View style={styles.descriptionHeader}>
             <Text style={styles.descriptionTitle}>Description</Text>
-            <TouchableOpacity
-              onPress={speakDescription}
-              style={[
-                styles.speakButton,
-                { backgroundColor: isPlaying ? '#ef4444' : '#3b82f6' }
-              ]}
-            >
-              <Ionicons 
-                name={isPlaying ? 'volume-mute' : 'volume-high'} 
-                size={20} 
-                color="white" 
-              />
-            </TouchableOpacity>
+            <View style={styles.descriptionControls}>
+              <TouchableOpacity
+                onPress={speakDescription}
+                style={[
+                  styles.speakButton,
+                  { backgroundColor: isPlaying ? '#ef4444' : '#3b82f6' }
+                ]}
+              >
+                <Ionicons 
+                  name={isPlaying ? 'volume-mute' : 'volume-high'} 
+                  size={20} 
+                  color="white" 
+                />
+              </TouchableOpacity>
+            </View>
           </View>
           
-        <Text style={styles.descriptionText}>
-  {captions[currentLanguage.code] || "No description available for this language."}
-</Text>
+          <Text style={styles.descriptionText}>
+            {captions[currentLanguage.code]?.text || "No description available for this language."}
+          </Text>
 
-        </View>
-      </View>
-
-      {/* Language Indicator */}
-      <View style={styles.languageContainer}>
-        <View style={styles.languageBox}>
-          <View style={styles.languageInfo}>
-            <Text style={styles.languageLabel}>Language:</Text>
-            <Text style={styles.currentLanguage}>{currentLanguage.name}</Text>
-          </View>
-          <View style={styles.languageProgress}>
-            {LANGUAGES.map((_, index) => (
-              <View
-                key={index}
-                style={[
-                  styles.progressBar,
-                  { backgroundColor: index === currentLanguageIndex ? '#3b82f6' : '#d1d5db' }
-                ]}
+          {/* Audio status indicator with sequential playback info */}
+          <View style={styles.audioStatusContainer}>
+            <View style={[
+              styles.audioStatusIndicator,
+              { backgroundColor: captions[currentLanguage.code]?.audio_base64 ? '#10b981' : '#6b7280' }
+            ]}>
+              <Ionicons 
+                name={captions[currentLanguage.code]?.audio_base64 ? 'checkmark-circle' : 'alert-circle'} 
+                size={16} 
+                color="white" 
               />
-            ))}
+              <Text style={styles.audioStatusText}>
+                {captions[currentLanguage.code]?.audio_base64 ? 'AI Audio Available' : 'TTS Only'}
+              </Text>
+            </View>
+            
+            {/* Show current playback status */}
+            {isPlaying && (
+              <View style={styles.playbackStatusContainer}>
+                <View style={[
+                  styles.playbackStatusIndicator,
+                  { backgroundColor: isPlayingDescription ? '#3b82f6' : '#f59e0b' }
+                ]}>
+                  <Ionicons 
+                    name={isPlayingDescription ? 'mic' : 'warning'} 
+                    size={12} 
+                    color="white" 
+                  />
+                  <Text style={styles.playbackStatusText}>
+                    {isPlayingDescription ? 'Playing Description' : 'Playing Safety Alert'}
+                  </Text>
+                </View>
+              </View>
+            )}
           </View>
         </View>
+
+        {/* Hazard Info Section */}
+        {hasHazardousObjects() && (
+          <View style={styles.hazardWrapper}>
+            <View style={styles.hazardHeader}>
+              <Ionicons name="warning" size={20} color="#f59e0b" />
+              <Text style={styles.hazardTitle}>Safety Alert</Text>
+              <Text style={styles.hazardLanguageNote}>
+                (Will be spoken in {currentLanguage.name})
+              </Text>
+            </View>
+            <Text style={styles.hazardText}>{hazardInfo}</Text>
+          </View>
+        )}
       </View>
+
+      {/* Language Container - Always visible */}
+     
 
       {/* Instructions */}
-      <View style={styles.instructionsContainer}>
-        <View style={styles.instructionsBox}>
-          <Text style={styles.instructionsText}>
-            Swipe right to change language • Swipe up to return to camera
-          </Text>
-        </View>
-      </View>
+    
     </View>
   );
 }
@@ -332,7 +727,7 @@ const styles = StyleSheet.create({
     zIndex: 10,
   },
   instructionBox: {
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
     padding: 12,
     borderRadius: 8,
     alignItems: 'center',
@@ -340,6 +735,7 @@ const styles = StyleSheet.create({
   instructionText: {
     color: 'white',
     fontSize: 14,
+    fontWeight: '500',
   },
   cameraIconOverlay: {
     position: 'absolute',
@@ -353,6 +749,33 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255, 255, 255, 0.2)',
     padding: 16,
     borderRadius: 50,
+  },
+  loadingOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.8)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 20,
+  },
+  loadingContainer: {
+    backgroundColor: 'rgba(255, 255, 255, 0.95)',
+    padding: 24,
+    borderRadius: 12,
+    alignItems: 'center',
+  },
+  loadingText: {
+    color: '#000',
+    fontSize: 18,
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+  loadingSubtext: {
+    color: '#6b7280',
+    fontSize: 14,
   },
   resultContainer: {
     flex: 1,
@@ -370,6 +793,21 @@ const styles = StyleSheet.create({
   headerTitle: {
     color: 'white',
     fontSize: 18,
+    fontWeight: '600',
+  },
+  headerControls: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  audioModeButton: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+  },
+  audioModeText: {
+    color: 'white',
+    fontSize: 12,
     fontWeight: '600',
   },
   languageIndicator: {
@@ -413,6 +851,7 @@ const styles = StyleSheet.create({
     backgroundColor: 'white',
     borderRadius: 8,
     padding: 16,
+    marginBottom: 12,
     elevation: 2,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
@@ -430,6 +869,10 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: '#1f2937',
   },
+  descriptionControls: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
   speakButton: {
     padding: 8,
     borderRadius: 20,
@@ -438,6 +881,70 @@ const styles = StyleSheet.create({
     color: '#374151',
     fontSize: 16,
     lineHeight: 24,
+    marginBottom: 12,
+  },
+  audioStatusContainer: {
+    alignItems: 'flex-start',
+    gap: 8,
+  },
+  audioStatusIndicator: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    gap: 4,
+  },
+  audioStatusText: {
+    color: 'white',
+    fontSize: 12,
+    fontWeight: '500',
+  },
+  playbackStatusContainer: {
+    marginTop: 4,
+  },
+  playbackStatusIndicator: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    gap: 4,
+  },
+  playbackStatusText: {
+    color: 'white',
+    fontSize: 11,
+    fontWeight: '500',
+  },
+  hazardWrapper: {
+    backgroundColor: '#fee2e2',
+    borderRadius: 8,
+    padding: 16,
+    borderLeftWidth: 4,
+    borderLeftColor: '#ef4444',
+  },
+  hazardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+    gap: 8,
+    flexWrap: 'wrap',
+  },
+  hazardTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#dc2626',
+  },
+  hazardLanguageNote: {
+    fontSize: 12,
+    color: '#dc2626',
+    fontStyle: 'italic',
+    opacity: 0.8,
+  },
+  hazardText: {
+    color: '#dc2626',
+    fontSize: 14,
+    lineHeight: 20,
   },
   languageContainer: {
     position: 'absolute',
