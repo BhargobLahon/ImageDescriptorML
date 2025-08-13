@@ -46,6 +46,4 @@ This project contains code and resources for machine learning and object detecti
 
 Feel free to submit issues or pull requests to improve the project.
 
-## License
 
-Specify your license here (e.g.,
